@@ -1,0 +1,62 @@
+---
+title: 'Appendix'
+output:
+  distill::distill_article:
+    toc:false:
+      theme: theme.css
+favicon: "images/favicon.ico"
+github-repo: childpovertyactionlab/DPD-incident-reports
+---
+
+Using data from the Dallas Open Data portal this report is intended to summarize police incidents in the City of Dallas on a monthly basis.
+
+Incident records from the Dallas Open Data portal currently exclude certain incident types (such as incidents involving juveniles) and may be subject to change over time.
+
+In order to keep this report concise only a select number of incidents classified as "Group A" will be included.
+
+# https://rstudio.github.io/distill/ for layout
+
+```{r, Incident Defitions, echo = FALSE, message=FALSE, warning=FALSE, fig.width=12,fig.height=8, layout="l-body-outset"}
+library(reactable)
+library(htmltools)
+
+order <- c(1, 2, 3, 4, 5, 6, 7)
+
+nibrs <- c("Murder & Non-negligent Manslaughter", 
+           "Violent Gun Crime", 
+           "Aggravated Assault (NFV)", 
+           "Robbery (Individual)", 
+           "Robbery (Business)", 
+           "Burglary (Residence)", 
+           "Burglary (Business)") 
+
+definition <- c("The willful (non-negligent) killing of one human being by another.", 
+                "A violent Group A that occurs with the use of a firearm. Includes aggravated assault, murder and non-negligent manslaughter, robbery, and burglary,",
+                "An unlawful attack by one person upon another for the purpose of inflicting severe or aggravated bodily injury.",
+                "The taking or attempt to take anything of value from an individual by force, threat of force or violence.",
+                "The taking or attempt to take anything of value from an business by force, threat of force or violence.",
+                "The unlawful entry of a residence to commit a felony or a theft.",
+                "The unlawful entry of a business to commit a felony or a theft.")
+
+incident_def <- data.frame(order, nibrs, definition)
+
+tbl_incidents <- reactable(incident_def,
+          compact = TRUE,
+          class = "cpal-tbl",
+          defaultSorted = c("order"),
+          columns = list(
+            order = colDef(
+              name = "Order",
+              show = FALSE),
+            nibrs = colDef(
+              name = "NIBRS Incident"),
+            definition = colDef(
+              name = "Definition")
+            ))
+
+div(class = "cpal-table",
+  div(class = "cpal-header",
+    h2(class = "cpal-title", "Included Incidents Types")),
+  tbl_incidents
+)
+```

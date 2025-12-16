@@ -1,0 +1,439 @@
+---
+title: 'Main Takeaways'
+output:
+  distill::distill_article:
+    toc:false:
+      theme: theme.css
+favicon: "images/favicon.ico"
+github-repo: childpovertyactionlab/dpd-incident-report
+---
+
+```{r Set-Up Block, include = FALSE}
+#### Libraries to load #####
+library(tidyverse)
+library(sf)
+library(leaflet)
+#library(mapboxapi)
+library(lubridate)
+library(rio)
+#library(tidycensus)
+library(htmltools)
+#library(arcgisbinding)
+library(reactable)
+library(CPALtools)
+
+#datalib <- "C:/Users/micha/CPAL Dropbox/" # Michael Laptop
+datalib <- "E:/CPAL Dropbox/" # Michael Desktop
+
+#### Import Arrest Data 
+arrests <- import(paste0(datalib, "Data Library/City of Dallas/04_Public Safety/Dallas Police/Data/Arrests/Processed Data/Dallas Police Arrests - All Arrests.csv")) %>%
+  select(incidentnum, arrestnumber, ararrestdate, ararresttime, arpremises)
+
+#### Defining vgc and firearms #####
+firearm <- c("Handgun", "Rifle","Firearm (Type Not Stated)", "Assault Weapon", "Unknown Type Gun", "Other/Unknown Gun", "Shotgun", "Other Gun", "Other Firearm")
+vgc_type <- c("AGG ASSAULT - NFV", "MURDER & NONNEGLIGENT MANSLAUGHTER", "NEGLIGENT MANSLAUGHTER")
+
+#### Importing Dallas Open Data portals and filtering into data frames #####
+dpdIncidents <- st_read(paste0(datalib, "Data Library/City of Dallas/04_Public Safety/Dallas Police/Data/Incidents/Processed Data/ODP - Dallas Police Incidents.gpkg"), layer = "Group A") %>%
+  left_join(., arrests) %>%
+  mutate(Date = as.Date(Date),
+         Time = lubridate::hm(Time),
+         Year = year(Date),
+         Month = month(Date),
+         Day = day(Date),
+         division = str_to_title(division),
+         crime_category = as.factor(nibrs_crime_category),
+         crime = as.factor(nibrs_crime),
+         Weekday = wday(Date),
+         DateTime = format(paste(Date, Time), format="%Y-%m-%d %H:%M:%S"),
+         hour = hour(Time),
+         vgc_flag = ifelse(nibrs_crime %in% vgc_type & Firearm == 1, 1, 0),
+         ToD = ifelse(hour >= 3 & hour < 7, "Early Morning",
+                      ifelse(hour >= 7 & hour < 13, "Morning",
+                             ifelse(hour >= 13 & hour < 18, "Afternoon",
+                                    ifelse(hour >= 18 & hour < 23, "Evening",
+                                           ifelse(hour >= 23 | hour < 3, "Night", "NA")
+                                           )
+                                    )
+                             )
+                      )
+         ) %>%
+  mutate(crime_title = ifelse(crime == "MURDER & NONNEGLIGENT MANSLAUGHTER", "Murder & Nonnegligent Manslaughter",
+                              ifelse(crime == "VIOLENT GUN CRIME", "Violent Gun Crime",
+                                     ifelse(crime == "AGG ASSAULT - NFV", "Aggravated Assault (NFV)",
+                                            ifelse(crime == "ROBBERY-BUSINESS", "Robbery (Business)",
+                                                   ifelse(crime == "ROBBERY-INDIVIDUAL", "Robbery (Individual)",
+                                                          ifelse(crime == "BURGLARY-RESIDENCE", "Burglary (Residence)",
+                                                                 ifelse(crime == "BURGLARY-BUSINESS", "Burglary (Business)",
+                                                                        "ERROR"
+                              )))))))) %>%
+  st_transform(crs = 4269) %>%
+  select(incidentnum:premise, incident_address:time1, reporteddate, involvement:ro1name, status, mo, offensecode:nibrs_type, zip_code:geocoded_column.longitude, taag:compsex, weaponused, tot_victims:crime_title) %>%
+  filter(crime %in% c("MURDER & NONNEGLIGENT MANSLAUGHTER", "AGG ASSAULT - NFV", "ROBBERY-BUSINESS", "ROBBERY-INDIVIDUAL", "BURGLARY-RESIDENCE", "BURGLARY-BUSINESS")) %>%
+    mutate(ArDate = as.Date(ararrestdate),
+         ArLength = time_length(ArDate-Date, unit = "days"),
+         ArOccur = ifelse(is.na(arrestnumber), "NO", "YES"))
+
+
+#unique(dpdIncidents$crime)
+
+
+# generate dataframes based on various time cuts needed for visuals
+currentmonth <- floor_date(today(), unit = "month")
+last30 <- currentmonth-months(1)
+lastweek <- as.Date(max(dpdIncidents$date1))-days(7)
+twoweeks <- as.Date(max(dpdIncidents$date1))-days(14)
+
+# generate vgc data frames
+# what need is there for these?
+vgc5year <- dpdIncidents %>%
+  filter(vgc_flag == 1,
+         Date >= currentmonth - years(5))
+
+vgc12months <- dpdIncidents %>%
+  filter(vgc_flag == 1,
+         Date >= currentmonth - years(1))
+
+vgc30days <- dpdIncidents %>%
+  filter(vgc_flag == 1,
+         Date >= last30 & Date < currentmonth)
+
+vgc7days <- dpdIncidents %>%
+  filter(vgc_flag == 1,
+         Date >= lastweek)
+
+dpdMonth <- dpdIncidents %>%
+  filter(Date >= last30 & Date < currentmonth)
+
+dpdWeek <- dpdIncidents %>%
+  filter(Date >= lastweek)
+
+arMonth <- dpdIncidents %>%
+  filter(ArDate >= last30 & ArDate < currentmonth)
+
+#### Import tenth mile grid of the City of Dallas #####
+grid_incidents <- st_read("data/dallas_tenthmilegrid.geojson") %>%
+  st_transform(crs = 4269) %>%
+  mutate(vgc_5year = lengths(st_intersects(., vgc5year)),
+         vgc_12months = lengths(st_intersects(., vgc12months)),
+         vgc_5yearAvg = vgc_5year/5,
+         vgc_perch = (vgc_12months-vgc_5yearAvg)/vgc_5yearAvg,
+         vgc_perch = ifelse(vgc_perch == "NaN", NA, vgc_perch))
+
+#### Import  Dallas boundaries #####
+DallasBoundary <- st_read("data/dallas_simpleboundary.geojson") %>%
+  st_transform(crs = 4269)
+
+dpd_beats <- st_read("data/dpd_beats.geojson") %>%
+  st_transform(crs = 4269)
+
+dpd_divisions <- st_read("data/dpd_divisions.geojson") %>%
+  st_transform(crs = 4269)
+
+thisyear <- year(last30)
+lastyear <- year(last30-years(1))
+thismonth <- month(last30)
+lastmonth <- month(last30 - month(1))
+
+month_comp <- dpdIncidents %>%
+  filter(crime %in% vgc_type & Firearm == 1) %>%
+  filter((Year == thisyear & Month == thismonth) | #most recent complete month
+           (Year == lastyear & Month == thismonth) | #year prior but same month
+           (Year == thisyear & Month == lastmonth)) %>% #last month
+  st_drop_geometry(.) %>%
+  group_by(Year, Month) %>%
+  summarise(count = n())
+
+month_01 <- month_comp %>%
+  filter(Year == thisyear & Month == month(last30))
+
+month_02 <- month_comp %>%
+  filter(Year == thisyear & Month == lastmonth)
+
+month_03 <- month_comp %>%
+  filter(Year == lastyear & Month == thismonth)
+
+month_04 <- dpdIncidents %>%
+  filter((Year == thisyear & Month == thismonth)) %>%
+  st_drop_geometry(.) %>%
+  group_by(Year, Month) %>%
+  summarise(count = n())
+
+week_comp <- dpdIncidents %>%
+  filter(crime %in% vgc_type & Firearm == 1) %>%
+  mutate(weekFlag = ifelse(Date >= lastweek, "This Week",
+                           ifelse(Date >= twoweeks & Date < lastweek, "Last Week",
+                                  "IGNORE"))) %>%
+  filter(weekFlag != "IGNORE") %>%
+  st_drop_geometry(.) %>%
+  group_by(weekFlag) %>%
+  summarise(count = n())
+
+week_01 <- week_comp %>%
+  filter(weekFlag == "This Week")
+
+week_02 <- week_comp %>%
+  filter(weekFlag == "Last Week")
+
+week_03 <- dpdIncidents %>%
+  mutate(weekFlag = ifelse(Date >= lastweek, "This Week",
+                           ifelse(Date >= twoweeks & Date < lastweek, "Last Week",
+                                  "IGNORE"))) %>%
+  filter(weekFlag == "This Week") %>%
+  st_drop_geometry(.) %>%
+  group_by(weekFlag) %>%
+  summarise(count = n())
+```
+
+```{r, High Risk Cells, include = FALSE}
+#### Import High Risk RTM Cells from most recent models
+#st_layers(paste0(datalib, "Safe Surroundings/04_Projects/RTM 2022/2022_Q1_RTM/Data/2022_Q1_RTM_Outputs.gpkg"))
+hr_directory <- paste0(datalib, "Safe Surroundings/04_Projects/RTM 2022/2022_Q1_RTM/Data/2022_Q1_RTM_Outputs.gpkg")
+
+SE_HR <- st_read(hr_directory, layer = "SE RTM RRSz") %>%
+  st_transform(crs = 4269) %>%
+  filter(highest == 1)
+SC_HR <- st_read(hr_directory, layer = "SC RTM RRSz") %>%
+  st_transform(crs = 4269) %>%
+  filter(highest == 1)
+C_HR <- st_read(hr_directory, layer = "C RTM RRSz") %>%
+  st_transform(crs = 4269) %>%
+  filter(highest == 1)
+NC_HR <- st_read(hr_directory, layer = "NC RTM RRSz") %>%
+  st_transform(crs = 4269) %>%
+  filter(highest == 1)
+NE_HR <- st_read(hr_directory, layer = "NE RTM RRSz") %>%
+  st_transform(crs = 4269) %>%
+  filter(highest == 1)
+NW_HR <- st_read(hr_directory, layer = "NW RTM RRSz") %>%
+  st_transform(crs = 4269) %>%
+  filter(highest == 1)
+SW_HR <- st_read(hr_directory, layer = "SW RTM RRSz") %>%
+  st_transform(crs = 4269) %>%
+  filter(highest == 1)
+
+SC_Mark <- vgc30days %>%
+  filter(division == "South Central") %>%
+  .[SC_HR, ] %>%
+  mutate(HighRisk = "TRUE") %>%
+  st_drop_geometry(.) %>%
+  select(servnumid, HighRisk)
+
+SE_Mark <- vgc30days %>%
+  filter(division == "Southeast") %>%
+  .[SE_HR, ] %>%
+  mutate(HighRisk = "TRUE") %>%
+  st_drop_geometry(.) %>%
+  select(servnumid, HighRisk)
+
+NE_Mark <- vgc30days %>%
+  filter(division == "Northeast") %>%
+  .[NE_HR, ] %>%
+  mutate(HighRisk = "TRUE") %>%
+  st_drop_geometry(.) %>%
+  select(servnumid, HighRisk)
+
+NW_Mark <- vgc30days %>%
+  filter(division == "Northwest") %>%
+  .[NW_HR, ] %>%
+  mutate(HighRisk = "TRUE") %>%
+  st_drop_geometry(.) %>%
+  select(servnumid, HighRisk)
+
+C_Mark <- vgc30days %>%
+  filter(division == "Central") %>%
+  .[C_HR, ] %>%
+  mutate(HighRisk = "TRUE") %>%
+  st_drop_geometry(.) %>%
+  select(servnumid, HighRisk)
+
+SW_Mark <- vgc30days %>%
+  filter(division == "Southwest") %>%
+  .[SW_HR, ] %>%
+  mutate(HighRisk = "TRUE") %>%
+  st_drop_geometry(.) %>%
+  select(servnumid, HighRisk)
+
+NC_Mark <- vgc30days %>%
+  filter(division == "North Central") %>%
+  .[NC_HR, ] %>%
+  mutate(HighRisk = "TRUE") %>%
+  st_drop_geometry(.) %>%
+  select(servnumid, HighRisk)
+
+vgc30days <- bind_rows(SC_Mark, SE_Mark, NE_Mark, NW_Mark, C_Mark, SW_Mark, NC_Mark) %>%
+  left_join(vgc30days, .)
+
+Division_VGC <- vgc30days %>%
+  st_drop_geometry(.) %>%
+  filter(vgc_flag == 1) %>%
+  group_by(division) %>%
+  summarise(count = n()) %>%
+  mutate(perc = count/sum(count))
+
+maxDivision <- filter(Division_VGC, perc == max(perc))
+
+vgc_hr <- vgc30days %>%
+  st_drop_geometry(.) %>%
+  filter(vgc_flag == 1) %>%
+  group_by(HighRisk) %>%
+  summarise(count = n()) %>%
+  filter(HighRisk == TRUE)
+```
+
+# `r paste(month(thismonth, label = TRUE, abbr = FALSE), thisyear)`
+
+## Last Month Summary
+
+The violent crime rate for **`r paste(month(thismonth, label = TRUE, abbr = FALSE), thisyear)`** was **`r round(month_01$count/(1304379/10000), digits = 3)`** per 10,000 residents.
+
+In the month of **`r paste(month(thismonth, label = TRUE, abbr = FALSE), thisyear)`** there were a total of **`r month_01$count`** violent gun crimes across the city.
+
+```{r, Monthly VGC Column Chart, echo = FALSE, message=FALSE, warning=FALSE, fig.width=10,fig.height=8}
+month_tbl <- dpdIncidents %>%
+  st_drop_geometry(.) %>%
+  filter(crime %in% vgc_type & Firearm == 1) %>%
+  filter(Date >= as.Date("2018-01-01")) %>%
+  group_by(Year, Month) %>%
+  summarize(vgcCount = n()) %>%
+  ungroup(.) %>%
+  mutate(Date = as.Date(paste0(Year, "-", Month, "-01")),
+         monthAvg = zoo::rollmean(vgcCount, k = 3, fill = NA))
+
+month_tbl %>%
+  ggplot(aes(x = Date, y = vgcCount)) +
+  geom_col(fill = "#595959",
+           alpha = 0.5) +
+  geom_line(aes(y = monthAvg),
+            color = "#ffffff",
+            size = 2) +
+  geom_line(aes(y = monthAvg),
+            color = "#e98816",
+            size = 1) +
+  labs(
+    title = "Violent Gun Crime by Month",
+    subtitle = "Relative to 3 Month Average",
+    x = "",
+    y = "",
+    color = 'VARIABLE'
+  ) +
+
+  theme_cpal()
+
+```
+
+This is **`r ifelse(month_01$count > month_02$count, "an increase", "a decrease")` of `r paste0(round(((month_01$count-month_02$count)/month_02$count)*100, digits = 1), "%")`** from **`r paste(month(lastmonth, label = TRUE, abbr = FALSE), thisyear)`**, and **`r ifelse(month_01$count > month_03$count, "an increase", "a decrease")`** of **`r paste0(round(((month_01$count-month_03$count)/month_03$count)*100, digits = 1), "%")`** from **`r paste(month(thismonth, label = TRUE, abbr = FALSE), lastyear)`**.
+
+There were **`r nrow(filter(vgc30days, tot_victims >= 4))`** incidents with 4 or more victims across the city last month.
+
+**`r paste0(round(max(Division_VGC$perc)*100, digit = 1), "%")`** of all violent gun crimes in **`r paste(month(thismonth, label = TRUE, abbr = FALSE), thisyear)`** occurred in **`r maxDivision$division`** Division
+
+```{r, Pie Chart Division, echo = FALSE, message=FALSE, warning=FALSE, fig.width=10,fig.height=8}
+pie_tbl <-vgc30days %>%
+  st_drop_geometry(.) %>%
+  group_by(division) %>%
+  summarize(vgcCount = n()) %>%
+  mutate(vgcPercent = round(vgcCount/sum(vgcCount), digits = 3)*100) %>%
+  arrange(desc(vgcPercent)) %>%
+  mutate(ypos = cumsum(vgcPercent)- 0.5*vgcPercent,
+         division = ifelse(division == "North Central", "NC",
+                           ifelse(division == "Northwest", "NW",
+                                  ifelse(division == "Northeast", "NE",
+                                         ifelse(division == "South Central", "SC",
+                                                ifelse(division == "Southwest", "SW",
+                                                       ifelse(division == "Southeast", "SE",
+                                                              ifelse(division == "Central", "C", "ERROR"
+                                  ))))))))
+
+pie_tbl %>%
+  ggplot(aes(x = "", y = vgcPercent, fill = reorder(division, vgcPercent))) +
+  geom_bar(stat = "identity", width = 1, color = "#ffffff", size = 1) +
+  scale_fill_manual(values = pal_cpalfac) +
+  coord_polar("y", start = 0) +
+  theme_cpal() +
+  theme(legend.position = "none",
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        panel.grid = element_blank(),
+        ) +
+  geom_text(aes(x = 1.2, 
+                y = ypos, 
+                label = paste0(division, "\n",
+                               vgcPercent, "%")), 
+            color = "white", 
+            fontface = "bold",
+            size=12) +
+  labs(
+    title = "Percent of Violent Gun Crimes by Division",
+    subtitle = "",
+    x = "",
+    y = "",
+    color = 'VARIABLE'
+  )
+```
+
+**`r paste0(round(vgc_hr$count/month_01$count*100, digit = 1), "%", " (", vgc_hr$count, ")")`** of Violent Gun Crimes occurred within a cell identified as "High Risk" by our most recent Risk Terrain Modeling Analysis.
+
+### Arrests
+```{r, Arrests, include = FALSE}
+ArVGC <- dpdMonth %>%
+  st_drop_geometry(.) %>%
+  filter(vgc_flag == 1) %>%
+  group_by(ArOccur) %>%
+  summarize(count = n(),
+            ArMedian = median(ArLength))
+
+ArSameDay <- dpdMonth %>%
+  st_drop_geometry(.) %>%
+  filter(vgc_flag == 1) %>%
+  filter(ArLength == 0) %>%
+  group_by(ArOccur) %>%
+  summarize(count = n())
+
+ArYes <- ArVGC %>%
+  filter(ArOccur == "YES")
+```
+
+In the last month there were a total of **`r paste0(ArYes$count)`** arrests for Violent Gun Crimes across the City of Dallas, which accounted for **`r paste0(round(ArYes$count/sum(ArVGC$count), digits = 3)*100, "%")`** of all Violent Gun Crime incidents.
+
+`r paste0(ArSameDay$count)` arrests occurred on the same day of the incident.
+
+## Last Week Summary
+
+For the week of **`r paste(format(lastweek, format = "%B %d, %Y"))`** there was a total of **`r week_01$count`** violent gun crimes across the city. This is a difference of **`r week_01$count - week_02$count`** from the prior week.
+
+```{r, Weekly VGC Column Chart, echo = FALSE, message=FALSE, warning=FALSE, fig.width=10,fig.height=8}
+week_tbl <- dpdIncidents %>%
+  st_drop_geometry(.) %>%
+  filter(crime %in% vgc_type & Firearm == 1) %>%
+  filter(Date >= as.Date("2018-01-01")) %>%
+  group_by(Date) %>%
+  summarize(vgcCount = n()) %>%
+  mutate(sevenAvg = zoo::rollmean(vgcCount, k = 28, fill = NA))
+
+week_tbl %>%
+  ggplot(aes(x = Date, y = vgcCount)) +
+  geom_col(fill = "#595959",
+           alpha = 0.5) +
+  geom_line(aes(y = sevenAvg),
+            color = "#ffffff",
+            size = 1.5) +
+  geom_line(aes(y = sevenAvg),
+            color = "#e98816",
+            size = 1) +
+  scale_y_continuous(limits = c(0, 15)) +
+  labs(
+    title = "Violent Gun Crime by Week",
+    subtitle = "Relative to 28 Day Average",
+    x = "",
+    y = "",
+    color = 'VARIABLE'
+  ) +
+
+  theme_cpal()
+```
+
+There were **`r nrow(filter(vgc7days, tot_victims >= 4))`** incidents with 4 or more victims across the city last week.
+
+The reported U.S. violent crime rate includes murder, rape and sexual assault, robbery, and assault
